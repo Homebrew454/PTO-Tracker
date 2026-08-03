@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>PTO Tracker — Duty Log</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0E141B">
+<meta name="background-color" content="#0E141B">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PTO Tracker">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #0E141B; }
+  * { box-sizing: border-box; }
+  .tabular-nums { font-variant-numeric: tabular-nums; }
+  input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); cursor: pointer; }
+  ::selection { background: rgba(201,162,39,0.12); }
+  input, button { font-family: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+// ---------------------------------------------------------------------------
+// Tokens
+// ---------------------------------------------------------------------------
+const COLOR = {
+  bg: "#0E141B", surface: "#161F2A", surfaceRaised: "#1C2733",
+  rule: "#2A3542", ruleFaint: "#1F2933",
+  gold: "#C9A227", goldDim: "#8B7220", goldSoft: "rgba(201,162,39,0.12)",
+  textPrimary: "#E7EAEE", textMuted: "#8996A6", textFaint: "#5B6675",
+  positive: "#5FAE7F", negative: "#C1554B",
+};
+const FONT_DISPLAY = "'Oswald', 'Bebas Neue', 'Arial Narrow', sans-serif";
+const FONT_MONO = "'JetBrains Mono', 'Roboto Mono', ui-monospace, monospace";
+const FONT_BODY = "'Inter', system-ui, -apple-system, sans-serif";
+
+const DEFAULT_SETTINGS = {
+  startingBalance: 161.55,
+  accrualRate: 10.77,
+  lastPaycheckDate: "2026-07-30",
+  historyStartDate: "2026-01-01",
+  payFrequencyDays: 14,
+  annualUsagePlan: 200,
+  planStartYear: 2027,
+  projectionEndDate: "2029-12-15",
+  workDayHours: 8,
+  ptoCap: 420,
+  rotationAnchorDate: "2026-01-01",
+  rotationOn1: 5,
+  rotationOff1: 2,
+  rotationOn2: 5,
+  rotationOff2: 3,
+};
+
+// ---------------------------------------------------------------------------
+// Storage (plain localStorage — this file runs standalone in any browser)
+// ---------------------------------------------------------------------------
+const storage = {
+  get(key) {
+    try {
+      const v = window.localStorage.getItem(key);
+      return v == null ? null : v;
+    } catch (e) { return null; }
+  },
+  set(key, value) {
+    try { window.localStorage.setItem(key, value); return true; }
+    catch (e) { return false; }
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Date helpers (UTC midnight throughout, to avoid TZ drift)
+// ---------------------------------------------------------------------------
+const toUTC = (isoDateStr) => new Date(isoDateStr + "T00:00:00Z");
+const addDaysUTC = (date, days) => new Date(date.getTime() + days * 86400000);
+const fmtISO = (date) => date.toISOString().slice(0, 10);
+const fmtShort = (date) => date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+const fmtChip = (date) => date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+
+function isRotationWorkDay(date, settings) {
+  const cycle = settings.rotationOn1 + settings.rotationOff1 + settings.rotationOn2 + settings.rotationOff2;
+  if (!cycle) return true;
+  const anchor = toUTC(settings.rotationAnchorDate);
+  const diffDays = Math.round((date.getTime() - anchor.getTime()) / 86400000);
+  const offset = ((diffDays % cycle) + cycle) % cycle;
+  const b1 = settings.rotationOn1;
+  const b2 = b1 + settings.rotationOff1;
+  const b3 = b2 + settings.rotationOn2;
+  if (offset < b1) return true;
+  if (offset < b2) return false;
+  if (offset < b3) return true;
+  return false;
+}
+
+function buildPayPeriods(settings) {
+  const start = toUTC(settings.lastPaycheckDate);
+  const end = toUTC(settings.projectionEndDate);
+  const periods = [];
+  let d = start;
+  while (d.getTime() <= end.getTime()) { periods.push(d); d = addDaysUTC(d, settings.payFrequencyDays); }
+  return periods;
+}
+function buildHistoryPeriods(settings) {
+  const anchor = toUTC(settings.lastPaycheckDate);
+  const histStart = toUTC(settings.historyStartDate);
+  const periods = [];
+  let d = addDaysUTC(anchor, -settings.payFrequencyDays);
+  while (d.getTime() >= histStart.getTime()) { periods.unshift(d); d = addDaysUTC(d, -settings.payFrequencyDays); }
+  return periods;
+}
+function buildRateSchedule(settings, rateChanges) {
+  const base = { date: toUTC(settings.lastPaycheckDate), rate: settings.accrualRate };
+  const changes = [...rateChanges]
+    .filter((r) => r.effectiveDate && !isNaN(Number(r.rate)))
+    .map((r) => ({ date: toUTC(r.effectiveDate), rate: Number(r.rate) }))
+    .filter((r) => r.date.getTime() >= base.date.getTime())
+    .sort((a, b) => a.date.getTime() - b.date.getTime());
+  return [base, ...changes];
+}
+function rateAt(schedule, date) {
+  let rate = schedule[0].rate;
+  for (const step of schedule) { if (step.date.getTime() <= date.getTime()) rate = step.rate; else break; }
+  return rate;
+}
+
+// ---------------------------------------------------------------------------
+// Core projection engine
+// ---------------------------------------------------------------------------
+function useProjection(settings, entries, rateChanges, today) {
+  return useMemo(() => {
+    const periods = buildPayPeriods(settings);
+    const future = periods.filter((p) => p.getTime() > toUTC(settings.lastPaycheckDate).getTime());
+    const schedule = buildRateSchedule(settings, rateChanges);
+
+    const periodsPerYear = {};
+    future.forEach((p) => { const y = p.getUTCFullYear(); periodsPerYear[y] = (periodsPerYear[y] || 0) + 1; });
+
+    const sortedEntries = [...entries].sort((a, b) => (a.date < b.date ? -1 : 1));
+    const usageInWindow = (fromExclusive, toInclusive) =>
+      sortedEntries.filter((e) => {
+        const t = toUTC(e.date).getTime();
+        return t > fromExclusive.getTime() && t <= toInclusive.getTime();
+      }).reduce((sum, e) => sum + Number(e.hours || 0), 0);
+
+    const todayTime = today.getTime();
+    const chartData = [];
+    const anchorDate = toUTC(settings.lastPaycheckDate);
+    const anchorBalance = Math.min(settings.startingBalance, settings.ptoCap);
+
+    const historyPeriods = buildHistoryPeriods(settings);
+    const chain = [...historyPeriods, anchorDate];
+    const chainBalances = new Array(chain.length);
+    chainBalances[chain.length - 1] = anchorBalance;
+    for (let i = chain.length - 1; i > 0; i--) {
+      const p = chain[i], prev = chain[i - 1];
+      const rate = rateAt(schedule, p);
+      const usage = usageInWindow(prev, p);
+      chainBalances[i - 1] = chainBalances[i] - rate + usage;
+    }
+    historyPeriods.forEach((p, idx) => {
+      chartData.push({ dateObj: p, date: fmtISO(p), logged: chainBalances[idx], projected: null });
+    });
+
+    let balance = anchorBalance;
+    let prevDate = anchorDate;
+    chartData.push({ dateObj: prevDate, date: fmtISO(prevDate), logged: balance, projected: prevDate.getTime() >= todayTime ? balance : null });
+
+    let currentBalance = anchorBalance;
+    let currentBalanceDate = prevDate;
+    let accruedThisYear = 0;
+    const year = today.getUTCFullYear();
+
+    historyPeriods.forEach((p) => { if (p.getUTCFullYear() === year) accruedThisYear += rateAt(schedule, p); });
+
+    future.forEach((p) => {
+      const rate = rateAt(schedule, p);
+      balance = Math.min(balance + rate, settings.ptoCap);
+      const isPast = p.getTime() <= todayTime;
+      if (isPast && p.getUTCFullYear() === year) accruedThisYear += rate;
+
+      if (isPast) {
+        balance -= usageInWindow(prevDate, p);
+      } else if (p.getUTCFullYear() >= settings.planStartYear) {
+        const ppy = periodsPerYear[p.getUTCFullYear()] || 1;
+        balance -= settings.annualUsagePlan / ppy;
+      }
+
+      chartData.push({ dateObj: p, date: fmtISO(p), logged: isPast ? balance : null, projected: !isPast ? balance : null });
+
+      if (isPast) { currentBalance = balance; currentBalanceDate = p; }
+      prevDate = p;
+    });
+
+    const bridgeIdx = chartData.findIndex((pt) => pt.projected !== null);
+    if (bridgeIdx > 0) chartData[bridgeIdx - 1].projected = chartData[bridgeIdx - 1].logged;
+
+    currentBalance -= usageInWindow(currentBalanceDate, today);
+
+    const usedThisYear = sortedEntries.filter((e) => toUTC(e.date).getUTCFullYear() === year).reduce((sum, e) => sum + Number(e.hours || 0), 0);
+    const planThisYear = year >= settings.planStartYear ? settings.annualUsagePlan : 0;
+    const nextPeriod = future.find((p) => p.getTime() > todayTime);
+    const currentRate = rateAt(schedule, today);
+    const nextRate = nextPeriod ? rateAt(schedule, nextPeriod) : currentRate;
+    const finalProjected = chartData[chartData.length - 1];
+
+    return {
+      chartData, currentBalance, accruedThisYear, usedThisYear, planThisYear,
+      remainingPlanThisYear: planThisYear - usedThisYear, nextPeriod, currentRate, nextRate,
+      endBalance: finalProjected ? (finalProjected.projected ?? finalProjected.logged) : currentBalance,
+      endDate: settings.projectionEndDate,
+      isAtCap: currentBalance >= settings.ptoCap - 0.005,
+    };
+  }, [settings, entries, rateChanges, today]);
+}
+
+// ---------------------------------------------------------------------------
+// Icons (hand-rolled, lucide-style: 24x24, stroke currentColor, round caps)
+// ---------------------------------------------------------------------------
+const Icon = ({ children, size = 16, style }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>{children}</svg>
+);
+const GearIcon = (p) => <Icon {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></Icon>;
+const PlusIcon = (p) => <Icon {...p}><path d="M12 5v14M5 12h14"/></Icon>;
+const TrashIcon = (p) => <Icon {...p}><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></Icon>;
+const ClockIcon = (p) => <Icon {...p}><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></Icon>;
+const DownloadIcon = (p) => <Icon {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></Icon>;
+const UploadIcon = (p) => <Icon {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></Icon>;
+
+// ---------------------------------------------------------------------------
+// Lightweight SVG line chart (no external chart library)
+// ---------------------------------------------------------------------------
+function TrajectoryChart({ data, cap, todayISO }) {
+  const width = 760, height = 260, padL = 44, padR = 12, padT = 16, padB = 24;
+  const innerW = width - padL - padR, innerH = height - padT - padB;
+
+  const allVals = data.flatMap((d) => [d.logged, d.projected]).filter((v) => v != null);
+  const maxVal = Math.max(cap, ...allVals) * 1.05;
+  const minVal = Math.min(0, ...allVals);
+  const n = data.length;
+
+  const x = (i) => padL + (n <= 1 ? 0 : (i / (n - 1)) * innerW);
+  const y = (v) => padT + innerH - ((v - minVal) / (maxVal - minVal || 1)) * innerH;
+
+  const pathFor = (key) => {
+    let d = "";
+    let started = false;
+    data.forEach((pt, i) => {
+      const v = pt[key];
+      if (v == null) { started = false; return; }
+      d += (started ? " L " : "M ") + x(i).toFixed(1) + " " + y(v).toFixed(1);
+      started = true;
+    });
+    return d;
+  };
+
+  const todayIdx = data.findIndex((d) => d.date === todayISO);
+  const yearTicks = [];
+  let lastYear = null;
+  data.forEach((d, i) => {
+    const yr = d.date.slice(0, 4);
+    if (yr !== lastYear) { yearTicks.push({ i, yr }); lastYear = yr; }
+  });
+
+  const yTicks = 4;
+  const yGrid = Array.from({ length: yTicks + 1 }, (_, k) => minVal + ((maxVal - minVal) * k) / yTicks);
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} style={{ display: "block" }}>
+      {yGrid.map((v, i) => (
+        <g key={i}>
+          <line x1={padL} x2={width - padR} y1={y(v)} y2={y(v)} stroke={COLOR.ruleFaint} strokeWidth="1" />
+          <text x={padL - 6} y={y(v) + 3} fontSize="9" textAnchor="end" fill={COLOR.textFaint} fontFamily={FONT_MONO}>{v.toFixed(0)}</text>
+        </g>
+      ))}
+      {yearTicks.map(({ i, yr }) => (
+        <text key={i} x={x(i)} y={height - 6} fontSize="9" textAnchor="middle" fill={COLOR.textFaint} fontFamily={FONT_MONO}>{yr}</text>
+      ))}
+      <line x1={padL} x2={width - padR} y1={y(cap)} y2={y(cap)} stroke={COLOR.negative} strokeOpacity="0.55" strokeDasharray="2 3" />
+      <text x={padL + 4} y={y(cap) - 4} fontSize="9" fill={COLOR.negative} fontFamily={FONT_MONO}>CAP {cap}</text>
+      {todayIdx >= 0 && (
+        <line x1={x(todayIdx)} x2={x(todayIdx)} y1={padT} y2={padT + innerH} stroke={COLOR.gold} strokeOpacity="0.6" strokeDasharray="2 3" />
+      )}
+      <path d={pathFor("logged")} fill="none" stroke={COLOR.textPrimary} strokeWidth="2" />
+      <path d={pathFor("projected")} fill="none" stroke={COLOR.gold} strokeWidth="2" strokeDasharray="4 3" />
+    </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Small presentational bits
+// ---------------------------------------------------------------------------
+function Stat({ label, value, suffix, tone }) {
+  const toneColor = tone === "positive" ? COLOR.positive : tone === "negative" ? COLOR.negative : COLOR.textPrimary;
+  return (
+    <div className="flex-1" style={{ minWidth: 140, padding: "12px 16px", borderLeft: `2px solid ${COLOR.rule}` }}>
+      <div style={{ fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase", color: COLOR.textFaint, fontFamily: FONT_BODY, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontFamily: FONT_MONO, color: toneColor, fontSize: 22 }} className="tabular-nums">
+        {value}{suffix && <span style={{ fontSize: 12, marginLeft: 4, color: COLOR.textFaint }}>{suffix}</span>}
+      </div>
+    </div>
+  );
+}
+function SettingField({ label, value, onChange, type }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <label style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: COLOR.textFaint }}>{label}</label>
+      <input type={type} value={value} step={type === "number" ? "any" : undefined}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ padding: "6px 8px", fontSize: 14, outline: "none", background: COLOR.surfaceRaised, border: `1px solid ${COLOR.rule}`, color: COLOR.textPrimary, fontFamily: FONT_MONO }} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
+function PTODashboard() {
+  const [settings, setSettings] = useState(() => {
+    const raw = storage.get("pto-settings");
+    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
+  });
+  const [entries, setEntries] = useState(() => {
+    const raw = storage.get("pto-entries");
+    return raw ? JSON.parse(raw) : [];
+  });
+  const [rateChanges, setRateChanges] = useState(() => {
+    const raw = storage.get("pto-rate-changes");
+    return raw ? JSON.parse(raw) : [];
+  });
+  const [showSettings, setShowSettings] = useState(false);
+  const [logMode, setLogMode] = useState("single");
+  const [formDate, setFormDate] = useState(fmtISO(new Date()));
+  const [formHours, setFormHours] = useState("8");
+  const [formNote, setFormNote] = useState("");
+  const [rangeStart, setRangeStart] = useState(fmtISO(new Date()));
+  const [rangeEnd, setRangeEnd] = useState(fmtISO(new Date()));
+  const [rangeHours, setRangeHours] = useState("8");
+  const [onlyWorkDays, setOnlyWorkDays] = useState(true);
+  const [rangeNote, setRangeNote] = useState("");
+  const [rateFormDate, setRateFormDate] = useState(fmtISO(new Date()));
+  const [rateFormValue, setRateFormValue] = useState("");
+
+  const today = useMemo(() => { const n = new Date(); return new Date(Date.UTC(n.getFullYear(), n.getMonth(), n.getDate())); }, []);
+
+  useEffect(() => { storage.set("pto-settings", JSON.stringify(settings)); }, [settings]);
+  useEffect(() => { storage.set("pto-entries", JSON.stringify(entries)); }, [entries]);
+  useEffect(() => { storage.set("pto-rate-changes", JSON.stringify(rateChanges)); }, [rateChanges]);
+
+  const projection = useProjection(settings, entries, rateChanges, today);
+
+  const addEntry = useCallback(() => {
+    const hrs = Number(formHours);
+    if (!formDate || !hrs || hrs <= 0) return;
+    setEntries((prev) => [...prev, { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, date: formDate, hours: hrs, note: formNote.trim() }]);
+    setFormHours("8"); setFormNote("");
+  }, [formDate, formHours, formNote]);
+
+  const rangeDates = useMemo(() => {
+    if (!rangeStart || !rangeEnd) return [];
+    const start = toUTC(rangeStart), end = toUTC(rangeEnd);
+    if (end.getTime() < start.getTime()) return [];
+    const dates = [];
+    let d = start;
+    while (d.getTime() <= end.getTime()) {
+      if (!(onlyWorkDays && !isRotationWorkDay(d, settings))) dates.push(d);
+      d = addDaysUTC(d, 1);
+    }
+    return dates;
+  }, [rangeStart, rangeEnd, onlyWorkDays, settings]);
+
+  const addRangeEntries = useCallback(() => {
+    const hrs = Number(rangeHours);
+    if (!rangeDates.length || !hrs || hrs <= 0) return;
+    const note = rangeNote.trim();
+    setEntries((prev) => [
+      ...prev,
+      ...rangeDates.map((d, i) => ({ id: `${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`, date: fmtISO(d), hours: hrs, note })),
+    ]);
+    setRangeNote("");
+  }, [rangeDates, rangeHours, rangeNote]);
+
+  const removeEntry = useCallback((id) => setEntries((prev) => prev.filter((e) => e.id !== id)), []);
+
+  const addRateChange = useCallback(() => {
+    const rate = Number(rateFormValue);
+    if (!rateFormDate || !rateFormValue || isNaN(rate) || rate < 0) return;
+    setRateChanges((prev) => [...prev, { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, effectiveDate: rateFormDate, rate }]);
+    setRateFormValue("");
+  }, [rateFormDate, rateFormValue]);
+  const removeRateChange = useCallback((id) => setRateChanges((prev) => prev.filter((r) => r.id !== id)), []);
+
+  const fileInputRef = useRef(null);
+  const [importMsg, setImportMsg] = useState("");
+
+  const exportBackup = useCallback(() => {
+    const payload = { app: "pto-tracker", exportedAt: fmtISO(new Date()), settings, entries, rateChanges };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `pto-tracker-backup-${fmtISO(new Date())}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [settings, entries, rateChanges]);
+
+  const triggerImport = useCallback(() => {
+    if (fileInputRef.current) fileInputRef.current.click();
+  }, []);
+
+  const handleImportFile = useCallback((e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (!data || typeof data !== "object" || !data.settings || !Array.isArray(data.entries)) {
+          setImportMsg("That file doesn't look like a PTO Tracker backup.");
+          return;
+        }
+        const proceed = window.confirm(
+          `Import backup from ${data.exportedAt || "unknown date"}? This replaces your current settings, ${entries.length} logged entr${entries.length === 1 ? "y" : "ies"}, and ${rateChanges.length} rate change${rateChanges.length === 1 ? "" : "s"} currently in this browser.`
+        );
+        if (!proceed) return;
+        setSettings({ ...DEFAULT_SETTINGS, ...data.settings });
+        setEntries(Array.isArray(data.entries) ? data.entries : []);
+        setRateChanges(Array.isArray(data.rateChanges) ? data.rateChanges : []);
+        setImportMsg("Backup imported.");
+      } catch (err) {
+        setImportMsg("Couldn't read that file — is it a PTO Tracker backup JSON?");
+      }
+    };
+    reader.readAsText(file);
+  }, [entries.length, rateChanges.length]);
+
+  useEffect(() => {
+    if (!importMsg) return;
+    const t = setTimeout(() => setImportMsg(""), 4000);
+    return () => clearTimeout(t);
+  }, [importMsg]);
+
+  const sortedEntries = useMemo(() => [...entries].sort((a, b) => (a.date < b.date ? 1 : -1)), [entries]);
+  const sortedRateChanges = useMemo(() => [...rateChanges].sort((a, b) => (a.effectiveDate < b.effectiveDate ? 1 : -1)), [rateChanges]);
+  const usagePct = projection.planThisYear ? Math.min(100, (projection.usedThisYear / projection.planThisYear) * 100) : 0;
+
+  const inputStyle = { padding: "6px 8px", fontSize: 14, outline: "none", background: COLOR.surfaceRaised, border: `1px solid ${COLOR.rule}`, color: COLOR.textPrimary };
+  const labelStyle = { fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: COLOR.textFaint };
+  const sectionLabel = { fontSize: 10, letterSpacing: "0.2em", textTransform: "uppercase", color: COLOR.textFaint, marginBottom: 12 };
+  const rowStyle = (i) => ({ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", fontSize: 14, background: i % 2 === 0 ? COLOR.surface : COLOR.surfaceRaised, borderLeft: `2px solid ${COLOR.gold}` });
+
+  return (
+    <div style={{ width: "100%", minHeight: "100vh", background: COLOR.bg, fontFamily: FONT_BODY, color: COLOR.textPrimary }}>
+      <div style={{ maxWidth: 960, margin: "0 auto", padding: "32px 20px" }}>
+
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <ClockIcon size={18} style={{ color: COLOR.gold }} />
+            <div>
+              <div style={{ fontSize: 10, letterSpacing: "0.22em", textTransform: "uppercase", color: COLOR.textFaint }}>Duty Log</div>
+              <h1 style={{ fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 20, textTransform: "uppercase", letterSpacing: "0.03em", margin: 0, lineHeight: 1 }}>PTO Tracker</h1>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input ref={fileInputRef} type="file" accept="application/json" onChange={handleImportFile} style={{ display: "none" }} />
+            <button onClick={exportBackup}
+              style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "8px 12px", color: COLOR.textMuted, border: `1px solid ${COLOR.rule}`, background: "transparent", cursor: "pointer" }}>
+              <DownloadIcon size={13} /> Export
+            </button>
+            <button onClick={triggerImport}
+              style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "8px 12px", color: COLOR.textMuted, border: `1px solid ${COLOR.rule}`, background: "transparent", cursor: "pointer" }}>
+              <UploadIcon size={13} /> Import
+            </button>
+            <button onClick={() => setShowSettings((s) => !s)}
+              style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "8px 12px", color: showSettings ? COLOR.gold : COLOR.textMuted, border: `1px solid ${COLOR.rule}`, background: showSettings ? COLOR.goldSoft : "transparent", cursor: "pointer" }}>
+              <GearIcon size={13} /> Settings
+            </button>
+          </div>
+        </div>
+        {importMsg && (
+          <div style={{ marginBottom: 16, marginTop: -12, fontSize: 12, color: importMsg.startsWith("Backup imported") ? COLOR.positive : COLOR.negative, fontFamily: FONT_MONO }}>
+            {importMsg}
+          </div>
+        )}
+
+        {/* Settings panel */}
+        {showSettings && (
+          <div style={{ marginBottom: 24, padding: 16, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 16, background: COLOR.surface, border: `1px solid ${COLOR.rule}` }}>
+            <SettingField label="Starting balance (hrs)" value={settings.startingBalance} type="number" onChange={(v) => setSettings((s) => ({ ...s, startingBalance: Number(v) }))} />
+            <SettingField label="Base accrual / pay period (hrs)" value={settings.accrualRate} type="number" onChange={(v) => setSettings((s) => ({ ...s, accrualRate: Number(v) }))} />
+            <SettingField label="As-of paycheck date" value={settings.lastPaycheckDate} type="date" onChange={(v) => setSettings((s) => ({ ...s, lastPaycheckDate: v }))} />
+            <SettingField label="History start date" value={settings.historyStartDate} type="date" onChange={(v) => setSettings((s) => ({ ...s, historyStartDate: v }))} />
+            <SettingField label="Pay frequency (days)" value={settings.payFrequencyDays} type="number" onChange={(v) => setSettings((s) => ({ ...s, payFrequencyDays: Number(v) }))} />
+            <SettingField label="Planned annual usage (hrs)" value={settings.annualUsagePlan} type="number" onChange={(v) => setSettings((s) => ({ ...s, annualUsagePlan: Number(v) }))} />
+            <SettingField label="Plan starts (year)" value={settings.planStartYear} type="number" onChange={(v) => setSettings((s) => ({ ...s, planStartYear: Number(v) }))} />
+            <SettingField label="Hours per work day" value={settings.workDayHours} type="number" onChange={(v) => setSettings((s) => ({ ...s, workDayHours: Number(v) }))} />
+            <SettingField label="PTO cap (hrs)" value={settings.ptoCap} type="number" onChange={(v) => setSettings((s) => ({ ...s, ptoCap: Number(v) }))} />
+            <SettingField label="Rotation anchor (1st day on)" value={settings.rotationAnchorDate} type="date" onChange={(v) => setSettings((s) => ({ ...s, rotationAnchorDate: v }))} />
+            <SettingField label="Days on (block 1)" value={settings.rotationOn1} type="number" onChange={(v) => setSettings((s) => ({ ...s, rotationOn1: Number(v) }))} />
+            <SettingField label="Days off (block 1)" value={settings.rotationOff1} type="number" onChange={(v) => setSettings((s) => ({ ...s, rotationOff1: Number(v) }))} />
+            <SettingField label="Days on (block 2)" value={settings.rotationOn2} type="number" onChange={(v) => setSettings((s) => ({ ...s, rotationOn2: Number(v) }))} />
+            <SettingField label="Days off (block 2)" value={settings.rotationOff2} type="number" onChange={(v) => setSettings((s) => ({ ...s, rotationOff2: Number(v) }))} />
+            <div style={{ gridColumn: "1 / -1" }}>
+              <SettingField label="Project balance through" value={settings.projectionEndDate} type="date" onChange={(v) => setSettings((s) => ({ ...s, projectionEndDate: v }))} />
+            </div>
+          </div>
+        )}
+
+        {/* Balance readout */}
+        <div style={{ marginBottom: 24, padding: "24px 22px", background: COLOR.surface, borderTop: `2px solid ${COLOR.gold}`, borderBottom: `2px solid ${COLOR.gold}` }}>
+          <div style={{ fontSize: 10, letterSpacing: "0.2em", textTransform: "uppercase", color: COLOR.textFaint, marginBottom: 4 }}>Current Balance · as of {fmtShort(today)}</div>
+          <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: "4px 16px" }}>
+            <div className="tabular-nums" style={{ fontFamily: FONT_MONO, fontSize: "clamp(2.5rem, 6vw, 4rem)", lineHeight: 1, color: COLOR.textPrimary }}>
+              {projection.currentBalance.toFixed(2)}<span style={{ fontSize: 20, marginLeft: 8, color: COLOR.goldDim }}>HRS</span>
+            </div>
+            <div className="tabular-nums" style={{ fontFamily: FONT_MONO, fontSize: "clamp(1.1rem, 3vw, 1.5rem)", color: COLOR.gold, paddingBottom: 4 }}>
+              ≈ {(projection.currentBalance / settings.workDayHours).toFixed(1)}<span style={{ fontSize: 13, marginLeft: 6, color: COLOR.goldDim }}>DAYS OFF</span>
+            </div>
+          </div>
+          <div style={{ marginTop: 8, fontSize: 12, color: COLOR.textMuted, fontFamily: FONT_MONO }}>
+            +{projection.currentRate.toFixed(2)} hrs / period · based on {settings.workDayHours}-hr work day ·{" "}
+            {projection.nextPeriod ? (
+              <>next accrual {fmtShort(projection.nextPeriod)}{projection.nextRate !== projection.currentRate && <span style={{ color: COLOR.gold }}> (rate changes to {projection.nextRate.toFixed(2)})</span>}</>
+            ) : "no further accruals scheduled"}
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginBottom: 4, fontFamily: FONT_MONO, color: COLOR.textFaint }}>
+              <span>CAP {settings.ptoCap.toFixed(0)} HRS</span>
+              <span style={{ color: projection.isAtCap ? COLOR.negative : COLOR.textFaint }}>{Math.min(100, (projection.currentBalance / settings.ptoCap) * 100).toFixed(0)}%</span>
+            </div>
+            <div style={{ height: 4, width: "100%", background: COLOR.ruleFaint }}>
+              <div style={{ height: 4, width: `${Math.min(100, (projection.currentBalance / settings.ptoCap) * 100)}%`, background: projection.isAtCap ? COLOR.negative : COLOR.gold, transition: "width 300ms ease" }} />
+            </div>
+            {projection.isAtCap && <div style={{ marginTop: 6, fontSize: 12, color: COLOR.negative, fontFamily: FONT_MONO }}>At cap — further accrual is forfeited until you use hours</div>}
+          </div>
+        </div>
+
+        {/* Stat strip */}
+        <div style={{ display: "flex", flexWrap: "wrap", background: COLOR.surface, border: `1px solid ${COLOR.rule}`, marginBottom: 8 }}>
+          <Stat label={`Accrued in ${today.getUTCFullYear()}`} value={`+${projection.accruedThisYear.toFixed(2)}`} tone="positive" />
+          <Stat label={`Used in ${today.getUTCFullYear()}`} value={projection.usedThisYear ? `-${projection.usedThisYear.toFixed(2)}` : "0.00"} tone={projection.usedThisYear ? "negative" : undefined} />
+          <Stat label={projection.planThisYear ? "Remaining plan" : "Usage plan"} value={projection.planThisYear ? projection.remainingPlanThisYear.toFixed(2) : `starts ${settings.planStartYear}`} />
+          <Stat label={`Projected · ${settings.projectionEndDate.slice(0, 4)}`} value={projection.endBalance.toFixed(2)} suffix={`≈${(projection.endBalance / settings.workDayHours).toFixed(1)}d`} />
+        </div>
+
+        {projection.planThisYear > 0 && (
+          <div style={{ marginBottom: 32 }}>
+            <div style={{ height: 4, width: "100%", background: COLOR.ruleFaint }}>
+              <div style={{ height: 4, width: `${usagePct}%`, background: COLOR.gold, transition: "width 300ms ease" }} />
+            </div>
+            <div style={{ fontSize: 10, marginTop: 4, color: COLOR.textFaint, fontFamily: FONT_MONO }}>
+              {projection.usedThisYear.toFixed(2)} / {projection.planThisYear.toFixed(0)} planned hrs used this year
+            </div>
+          </div>
+        )}
+
+        {/* Chart */}
+        <div style={{ marginBottom: 32 }}>
+          <div style={sectionLabel}>Balance Trajectory — logged vs. plan</div>
+          <div style={{ fontSize: 10, marginTop: -8, marginBottom: 12, color: COLOR.textFaint, fontFamily: FONT_MONO }}>
+            {settings.historyStartDate} → {settings.lastPaycheckDate} is reconstructed backward from your as-of balance (assumes no cap was hit); everything after is tracked forward. If you're on pace to use your full {settings.annualUsagePlan}-hr annual plan every period, the projected line plateaus a bit below the {settings.ptoCap}-hr cap (usage is assumed to land the same period as accrual) — the balance only sits exactly at {settings.ptoCap} if you go a stretch without using hours.
+          </div>
+          <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.rule}`, padding: 12 }}>
+            <TrajectoryChart data={projection.chartData} cap={settings.ptoCap} todayISO={fmtISO(today)} />
+            <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 10, color: COLOR.textFaint, fontFamily: FONT_MONO }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ display: "inline-block", width: 12, height: 2, background: COLOR.textPrimary }} /> logged</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ display: "inline-block", width: 12, height: 2, borderTop: `2px dashed ${COLOR.gold}` }} /> planned</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Log time off */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div style={sectionLabel}>Log Time Off</div>
+          <div style={{ display: "flex", border: `1px solid ${COLOR.rule}` }}>
+            <button onClick={() => setLogMode("single")}
+              style={{ fontSize: 11, padding: "4px 12px", fontFamily: FONT_MONO, background: logMode === "single" ? COLOR.goldSoft : "transparent", color: logMode === "single" ? COLOR.gold : COLOR.textMuted, border: "none", cursor: "pointer" }}>
+              Single Day
+            </button>
+            <button onClick={() => setLogMode("range")}
+              style={{ fontSize: 11, padding: "4px 12px", fontFamily: FONT_MONO, background: logMode === "range" ? COLOR.goldSoft : "transparent", color: logMode === "range" ? COLOR.gold : COLOR.textMuted, border: "none", borderLeft: `1px solid ${COLOR.rule}`, cursor: "pointer" }}>
+              Date Range
+            </button>
+          </div>
+        </div>
+
+        {logMode === "single" ? (
+          <div style={{ marginBottom: 12, padding: 14, display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end", background: COLOR.surface, border: `1px solid ${COLOR.rule}` }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={labelStyle}>Date</label>
+              <input type="date" value={formDate} onChange={(e) => setFormDate(e.target.value)} style={{ ...inputStyle, fontFamily: FONT_MONO }} />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={labelStyle}>Hours</label>
+              <input type="number" min="0.25" step="0.25" value={formHours} onChange={(e) => setFormHours(e.target.value)} className="tabular-nums" style={{ ...inputStyle, fontFamily: FONT_MONO, width: 90 }} />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 160 }}>
+              <label style={labelStyle}>Note (optional)</label>
+              <input type="text" placeholder="e.g. day off" value={formNote} onChange={(e) => setFormNote(e.target.value)} style={{ ...inputStyle, width: "100%" }} />
+            </div>
+            <button onClick={addEntry} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", fontSize: 14, fontWeight: 500, background: COLOR.gold, color: "#1A1400", border: "none", cursor: "pointer" }}>
+              <PlusIcon size={14} /> Log
+            </button>
+          </div>
+        ) : (
+          <div style={{ marginBottom: 12, padding: 14, display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end", background: COLOR.surface, border: `1px solid ${COLOR.rule}` }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={labelStyle}>From</label>
+              <input type="date" value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} style={{ ...inputStyle, fontFamily: FONT_MONO }} />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={labelStyle}>To</label>
+              <input type="date" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} style={{ ...inputStyle, fontFamily: FONT_MONO }} />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={labelStyle}>Hours / day</label>
+              <input type="number" min="0.25" step="0.25" value={rangeHours} onChange={(e) => setRangeHours(e.target.value)} className="tabular-nums" style={{ ...inputStyle, fontFamily: FONT_MONO, width: 90 }} />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 160 }}>
+              <label style={labelStyle}>Note (optional)</label>
+              <input type="text" placeholder="e.g. week at the cabin" value={rangeNote} onChange={(e) => setRangeNote(e.target.value)} style={{ ...inputStyle, width: "100%" }} />
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, paddingBottom: 6, color: COLOR.textMuted, cursor: "pointer" }}>
+              <input type="checkbox" checked={onlyWorkDays} onChange={(e) => setOnlyWorkDays(e.target.checked)} />
+              Only my scheduled work days (rotation)
+            </label>
+            <button onClick={addRangeEntries} disabled={!rangeDates.length}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", fontSize: 14, fontWeight: 500, background: COLOR.gold, color: "#1A1400", border: "none", opacity: rangeDates.length ? 1 : 0.4, cursor: rangeDates.length ? "pointer" : "not-allowed" }}>
+              <PlusIcon size={14} /> Log {rangeDates.length || ""} Day{rangeDates.length === 1 ? "" : "s"}
+            </button>
+            <div style={{ fontSize: 10, width: "100%", color: COLOR.textFaint, fontFamily: FONT_MONO }}>
+              {rangeDates.length > 0
+                ? `= ${(rangeDates.length * Number(rangeHours || 0)).toFixed(2)} hrs total across ${rangeDates.length} day${rangeDates.length === 1 ? "" : "s"}`
+                : "pick a valid range to preview total hours"}
+            </div>
+            <div style={{ fontSize: 10, width: "100%", color: COLOR.textFaint }}>
+              Rotation: {settings.rotationOn1} on / {settings.rotationOff1} off / {settings.rotationOn2} on / {settings.rotationOff2} off, anchored to {settings.rotationAnchorDate} (edit in Settings if that date wasn't day one of an on-block).
+            </div>
+          </div>
+        )}
+        {sortedEntries.length > 0 && (
+          <div style={{ border: `1px solid ${COLOR.rule}`, marginBottom: 16 }}>
+            {sortedEntries.map((e, i) => (
+              <div key={e.id} style={rowStyle(i)}>
+                <span className="tabular-nums" style={{ width: 80, flexShrink: 0, fontFamily: FONT_MONO, color: COLOR.textMuted }}>{fmtChip(toUTC(e.date))}</span>
+                <span className="tabular-nums" style={{ width: 64, flexShrink: 0, fontFamily: FONT_MONO, color: COLOR.negative }}>-{Number(e.hours).toFixed(2)}</span>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: e.note ? COLOR.textPrimary : COLOR.textFaint }}>{e.note || "—"}</span>
+                <button onClick={() => removeEntry(e.id)} style={{ flexShrink: 0, padding: 4, background: "none", border: "none", color: COLOR.textFaint, cursor: "pointer" }} aria-label="Delete entry"><TrashIcon size={14} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Rate change schedule */}
+        <div style={sectionLabel}>Accrual Rate Schedule</div>
+        <div style={{ marginBottom: 12, padding: 14, display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end", background: COLOR.surface, border: `1px solid ${COLOR.rule}` }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={labelStyle}>Effective date</label>
+            <input type="date" value={rateFormDate} onChange={(e) => setRateFormDate(e.target.value)} style={{ ...inputStyle, fontFamily: FONT_MONO }} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={labelStyle}>New rate (hrs/period)</label>
+            <input type="number" min="0" step="0.01" placeholder="e.g. 12.31" value={rateFormValue} onChange={(e) => setRateFormValue(e.target.value)} className="tabular-nums" style={{ ...inputStyle, fontFamily: FONT_MONO, width: 128 }} />
+          </div>
+          <button onClick={addRateChange} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", fontSize: 14, fontWeight: 500, background: COLOR.gold, color: "#1A1400", border: "none", cursor: "pointer" }}>
+            <PlusIcon size={14} /> Add Change
+          </button>
+          <div style={{ fontSize: 10, color: COLOR.textFaint, marginLeft: "auto" }}>Applies from the effective date onward — past and future accruals recalculate automatically.</div>
+        </div>
+        {sortedRateChanges.length > 0 && (
+          <div style={{ border: `1px solid ${COLOR.rule}`, marginBottom: 32 }}>
+            {sortedRateChanges.map((r, i) => (
+              <div key={r.id} style={rowStyle(i)}>
+                <span className="tabular-nums" style={{ width: 80, flexShrink: 0, fontFamily: FONT_MONO, color: COLOR.textMuted }}>{fmtChip(toUTC(r.effectiveDate))}</span>
+                <span className="tabular-nums" style={{ width: 112, flexShrink: 0, fontFamily: FONT_MONO, color: COLOR.positive }}>{Number(r.rate).toFixed(2)} hrs/pd</span>
+                <span style={{ flex: 1, color: COLOR.textFaint }}>effective onward</span>
+                <button onClick={() => removeRateChange(r.id)} style={{ flexShrink: 0, padding: 4, background: "none", border: "none", color: COLOR.textFaint, cursor: "pointer" }} aria-label="Delete rate change"><TrashIcon size={14} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ fontSize: 10, color: COLOR.textFaint, fontFamily: FONT_MONO }}>
+          {entries.length} entr{entries.length === 1 ? "y" : "ies"} logged · saved to this browser only — hit Export above periodically to keep a backup
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<PTODashboard />);
+</script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("service-worker.js").catch(() => {
+        // service workers require http(s) hosting — silently no-op if unavailable (e.g. file://)
+      });
+    });
+  }
+</script>
+</body>
+</html>
