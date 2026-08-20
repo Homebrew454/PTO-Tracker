@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -539,6 +540,13 @@ function PTODashboard() {
   }, [importMsg]);
 
   const sortedEntries = useMemo(() => [...entries].sort((a, b) => (a.date < b.date ? 1 : -1)), [entries]);
+  const [showAllYears, setShowAllYears] = useState(false);
+  const currentYear = today.getUTCFullYear();
+  const visibleEntries = useMemo(
+    () => showAllYears ? sortedEntries : sortedEntries.filter((e) => toUTC(e.date).getUTCFullYear() >= currentYear),
+    [sortedEntries, showAllYears, currentYear]
+  );
+  const hiddenPastCount = sortedEntries.length - visibleEntries.length;
   const sortedRateChanges = useMemo(() => [...rateChanges].sort((a, b) => (a.effectiveDate < b.effectiveDate ? 1 : -1)), [rateChanges]);
   const usageByYear = useMemo(() => {
     const totals = {};
@@ -799,7 +807,7 @@ function PTODashboard() {
         )}
         {sortedEntries.length > 0 && (
           <div style={{ border: `1px solid ${COLOR.rule}`, marginBottom: 16 }}>
-            {sortedEntries.map((e, i) => (
+            {visibleEntries.map((e, i) => (
               <div key={e.id} style={rowStyle(i)}>
                 <span className="tabular-nums" style={{ width: 112, flexShrink: 0, fontFamily: FONT_MONO, color: COLOR.textMuted }}>{fmtChip(toUTC(e.date))}</span>
                 <span className="tabular-nums" style={{ width: 64, flexShrink: 0, fontFamily: FONT_MONO, color: COLOR.negative }}>-{Number(e.hours).toFixed(2)}</span>
@@ -807,6 +815,14 @@ function PTODashboard() {
                 <button onClick={() => removeEntry(e.id)} style={{ flexShrink: 0, padding: 4, background: "none", border: "none", color: COLOR.textFaint, cursor: "pointer" }} aria-label="Delete entry"><TrashIcon size={14} /></button>
               </div>
             ))}
+            {hiddenPastCount > 0 && (
+              <button onClick={() => setShowAllYears((s) => !s)}
+                style={{ width: "100%", textAlign: "center", padding: "10px 14px", fontSize: 11, fontFamily: FONT_MONO, color: COLOR.gold, background: COLOR.goldSoft, border: "none", borderTop: `1px solid ${COLOR.rule}`, cursor: "pointer" }}>
+                {showAllYears
+                  ? "Hide prior years — collapse back into Usage by Year"
+                  : `+ ${hiddenPastCount} older entr${hiddenPastCount === 1 ? "y" : "ies"} from prior years — Show all years`}
+              </button>
+            )}
           </div>
         )}
 
