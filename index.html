@@ -254,10 +254,18 @@ function useProjection(settings, entries, rateChanges, today) {
     // covered by logged entries (past or future-dated) is spread across that year's
     // remaining (not-yet-paid) periods. Logged entries are always subtracted in the
     // period they fall in, so nothing is counted twice or skipped.
+    // Count every remaining payday in each year (through Dec 31 of the projection year),
+    // not just paydays up to the "Project balance through" date — otherwise picking an
+    // early date would cram the whole annual plan into a few periods.
     const remainingPeriodsPerYear = {};
-    future.forEach((p) => {
-      if (p.getTime() > todayTime) { const y = p.getUTCFullYear(); remainingPeriodsPerYear[y] = (remainingPeriodsPerYear[y] || 0) + 1; }
-    });
+    {
+      const yearEnd = Date.UTC(toUTC(settings.projectionEndDate).getUTCFullYear(), 11, 31);
+      let p = addDaysUTC(anchorDate, settings.payFrequencyDays);
+      while (p.getTime() <= yearEnd) {
+        if (p.getTime() > todayTime) { const y = p.getUTCFullYear(); remainingPeriodsPerYear[y] = (remainingPeriodsPerYear[y] || 0) + 1; }
+        p = addDaysUTC(p, settings.payFrequencyDays);
+      }
+    }
     const loggedByYear = {};
     sortedEntries.forEach((e) => { const y = toUTC(e.date).getUTCFullYear(); loggedByYear[y] = (loggedByYear[y] || 0) + Number(e.hours || 0); });
     const planPerPeriod = (y) => {
@@ -295,10 +303,16 @@ function useProjection(settings, entries, rateChanges, today) {
     const nextRate = nextPeriod ? rateAt(schedule, nextPeriod) : currentRate;
     const finalProjected = chartData[chartData.length - 1];
 
+    // Balance on the exact "Project balance through" date: the last payday's balance,
+    // minus any time off logged after that payday up to and including the chosen date.
+    const endDateObj = toUTC(settings.projectionEndDate);
+    let endBalance = finalProjected ? (finalProjected.projected ?? finalProjected.logged) : currentBalance;
+    if (endDateObj.getTime() > prevDate.getTime()) endBalance -= usageInWindow(prevDate, endDateObj);
+
     return {
       chartData, currentBalance, accruedThisYear, usedThisYear, planThisYear,
       remainingPlanThisYear: planThisYear - usedThisYear, nextPeriod, currentRate, nextRate,
-      endBalance: finalProjected ? (finalProjected.projected ?? finalProjected.logged) : currentBalance,
+      endBalance,
       endDate: settings.projectionEndDate,
       isAtCap: currentBalance >= settings.ptoCap - 0.005,
     };
@@ -666,7 +680,7 @@ function PTODashboard() {
           <Stat label={`Accrued in ${today.getUTCFullYear()}`} value={`+${projection.accruedThisYear.toFixed(2)}`} tone="positive" />
           <Stat label={`Used in ${today.getUTCFullYear()}`} value={projection.usedThisYear ? `-${projection.usedThisYear.toFixed(2)}` : "0.00"} tone={projection.usedThisYear ? "negative" : undefined} />
           <Stat label={projection.planThisYear ? "Remaining plan" : "Usage plan"} value={projection.planThisYear ? projection.remainingPlanThisYear.toFixed(2) : `starts ${settings.planStartYear}`} />
-          <Stat label={`Projected · ${settings.projectionEndDate.slice(0, 4)}`} value={projection.endBalance.toFixed(2)} suffix={`≈${(projection.endBalance / settings.workDayHours).toFixed(1)}d`} />
+          <Stat label={`Projected · ${fmtShort(toUTC(settings.projectionEndDate))}`} value={projection.endBalance.toFixed(2)} suffix={`≈${(projection.endBalance / settings.workDayHours).toFixed(1)}d`} />
         </div>
 
         {projection.planThisYear > 0 && (
