@@ -333,65 +333,6 @@ const ClockIcon = (p) => <Icon {...p}><circle cx="12" cy="12" r="10"/><path d="M
 const DownloadIcon = (p) => <Icon {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></Icon>;
 const UploadIcon = (p) => <Icon {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></Icon>;
 
-// ---------------------------------------------------------------------------
-// Lightweight SVG line chart (no external chart library)
-// ---------------------------------------------------------------------------
-function TrajectoryChart({ data, cap, todayISO }) {
-  const width = 760, height = 260, padL = 44, padR = 12, padT = 16, padB = 24;
-  const innerW = width - padL - padR, innerH = height - padT - padB;
-
-  const allVals = data.flatMap((d) => [d.logged, d.projected]).filter((v) => v != null);
-  const maxVal = Math.max(cap, ...allVals) * 1.05;
-  const minVal = Math.min(0, ...allVals);
-  const n = data.length;
-
-  const x = (i) => padL + (n <= 1 ? 0 : (i / (n - 1)) * innerW);
-  const y = (v) => padT + innerH - ((v - minVal) / (maxVal - minVal || 1)) * innerH;
-
-  const pathFor = (key) => {
-    let d = "";
-    let started = false;
-    data.forEach((pt, i) => {
-      const v = pt[key];
-      if (v == null) { started = false; return; }
-      d += (started ? " L " : "M ") + x(i).toFixed(1) + " " + y(v).toFixed(1);
-      started = true;
-    });
-    return d;
-  };
-
-  const todayIdx = data.findIndex((d) => d.date === todayISO);
-  const yearTicks = [];
-  let lastYear = null;
-  data.forEach((d, i) => {
-    const yr = d.date.slice(0, 4);
-    if (yr !== lastYear) { yearTicks.push({ i, yr }); lastYear = yr; }
-  });
-
-  const yTicks = 4;
-  const yGrid = Array.from({ length: yTicks + 1 }, (_, k) => minVal + ((maxVal - minVal) * k) / yTicks);
-
-  return (
-    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} style={{ display: "block" }}>
-      {yGrid.map((v, i) => (
-        <g key={i}>
-          <line x1={padL} x2={width - padR} y1={y(v)} y2={y(v)} stroke={COLOR.ruleFaint} strokeWidth="1" />
-          <text x={padL - 6} y={y(v) + 3} fontSize="9" textAnchor="end" fill={COLOR.textFaint} fontFamily={FONT_MONO}>{v.toFixed(0)}</text>
-        </g>
-      ))}
-      {yearTicks.map(({ i, yr }) => (
-        <text key={i} x={x(i)} y={height - 6} fontSize="9" textAnchor="middle" fill={COLOR.textFaint} fontFamily={FONT_MONO}>{yr}</text>
-      ))}
-      <line x1={padL} x2={width - padR} y1={y(cap)} y2={y(cap)} stroke={COLOR.negative} strokeOpacity="0.55" strokeDasharray="2 3" />
-      <text x={padL + 4} y={y(cap) - 4} fontSize="9" fill={COLOR.negative} fontFamily={FONT_MONO}>CAP {cap}</text>
-      {todayIdx >= 0 && (
-        <line x1={x(todayIdx)} x2={x(todayIdx)} y1={padT} y2={padT + innerH} stroke={COLOR.gold} strokeOpacity="0.6" strokeDasharray="2 3" />
-      )}
-      <path d={pathFor("logged")} fill="none" stroke={COLOR.textPrimary} strokeWidth="2" />
-      <path d={pathFor("projected")} fill="none" stroke={COLOR.gold} strokeWidth="2" strokeDasharray="4 3" />
-    </svg>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Small presentational bits
@@ -676,7 +617,7 @@ function PTODashboard() {
         </div>
 
         {/* Stat strip */}
-        <div style={{ display: "flex", flexWrap: "wrap", background: COLOR.surface, border: `1px solid ${COLOR.rule}`, marginBottom: 8 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", background: COLOR.surface, border: `1px solid ${COLOR.rule}`, marginBottom: projection.planThisYear > 0 ? 8 : 32 }}>
           <Stat label={`Accrued in ${today.getUTCFullYear()}`} value={`+${projection.accruedThisYear.toFixed(2)}`} tone="positive" />
           <Stat label={`Used in ${today.getUTCFullYear()}`} value={projection.usedThisYear ? `-${projection.usedThisYear.toFixed(2)}` : "0.00"} tone={projection.usedThisYear ? "negative" : undefined} />
           <Stat label={projection.planThisYear ? "Remaining plan" : "Usage plan"} value={projection.planThisYear ? projection.remainingPlanThisYear.toFixed(2) : `starts ${settings.planStartYear}`} />
@@ -693,21 +634,6 @@ function PTODashboard() {
             </div>
           </div>
         )}
-
-        {/* Chart */}
-        <div style={{ marginBottom: 32 }}>
-          <div style={sectionLabel}>Balance Trajectory — logged vs. plan</div>
-          <div style={{ fontSize: 10, marginTop: -8, marginBottom: 12, color: COLOR.textFaint, fontFamily: FONT_MONO }}>
-            {settings.historyStartDate} → {settings.lastPaycheckDate} is reconstructed backward from your as-of balance (assumes no cap was hit); everything after is tracked forward. If you're on pace to use your full {settings.annualUsagePlan}-hr annual plan every period, the projected line plateaus a bit below the {settings.ptoCap}-hr cap (usage is assumed to land the same period as accrual) — the balance only sits exactly at {settings.ptoCap} if you go a stretch without using hours.
-          </div>
-          <div style={{ background: COLOR.surface, border: `1px solid ${COLOR.rule}`, padding: 12 }}>
-            <TrajectoryChart data={projection.chartData} cap={settings.ptoCap} todayISO={fmtISO(today)} />
-            <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 10, color: COLOR.textFaint, fontFamily: FONT_MONO }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ display: "inline-block", width: 12, height: 2, background: COLOR.textPrimary }} /> logged</span>
-              <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ display: "inline-block", width: 12, height: 2, borderTop: `2px dashed ${COLOR.gold}` }} /> planned</span>
-            </div>
-          </div>
-        </div>
 
         {/* Retirement Date Option */}
         <div style={{ marginBottom: 32 }}>
