@@ -213,9 +213,6 @@ function useProjection(settings, entries, rateChanges, today) {
     const future = periods.filter((p) => p.getTime() > toUTC(settings.lastPaycheckDate).getTime());
     const schedule = buildRateSchedule(settings, rateChanges);
 
-    const periodsPerYear = {};
-    future.forEach((p) => { const y = p.getUTCFullYear(); periodsPerYear[y] = (periodsPerYear[y] || 0) + 1; });
-
     const sortedEntries = [...entries].sort((a, b) => (a.date < b.date ? -1 : 1));
     const usageInWindow = (fromExclusive, toInclusive) =>
       sortedEntries.filter((e) => {
@@ -253,18 +250,32 @@ function useProjection(settings, entries, rateChanges, today) {
 
     historyPeriods.forEach((p) => { if (p.getUTCFullYear() === year) accruedThisYear += rateAt(schedule, p); });
 
+    // Planned usage: for each plan year, only the part of the annual plan NOT already
+    // covered by logged entries (past or future-dated) is spread across that year's
+    // remaining (not-yet-paid) periods. Logged entries are always subtracted in the
+    // period they fall in, so nothing is counted twice or skipped.
+    const remainingPeriodsPerYear = {};
+    future.forEach((p) => {
+      if (p.getTime() > todayTime) { const y = p.getUTCFullYear(); remainingPeriodsPerYear[y] = (remainingPeriodsPerYear[y] || 0) + 1; }
+    });
+    const loggedByYear = {};
+    sortedEntries.forEach((e) => { const y = toUTC(e.date).getUTCFullYear(); loggedByYear[y] = (loggedByYear[y] || 0) + Number(e.hours || 0); });
+    const planPerPeriod = (y) => {
+      if (y < settings.planStartYear) return 0;
+      const unplannedLeft = Math.max(0, settings.annualUsagePlan - (loggedByYear[y] || 0));
+      return unplannedLeft / (remainingPeriodsPerYear[y] || 1);
+    };
+
     future.forEach((p) => {
       const rate = rateAt(schedule, p);
       balance = Math.min(balance + rate, settings.ptoCap);
       const isPast = p.getTime() <= todayTime;
       if (isPast && p.getUTCFullYear() === year) accruedThisYear += rate;
 
-      if (isPast) {
-        balance -= usageInWindow(prevDate, p);
-      } else if (p.getUTCFullYear() >= settings.planStartYear) {
-        const ppy = periodsPerYear[p.getUTCFullYear()] || 1;
-        balance -= settings.annualUsagePlan / ppy;
-      }
+      // Logged time off in this window always counts — including days logged since the
+      // last paycheck and future-dated (scheduled) time off.
+      balance -= usageInWindow(prevDate, p);
+      if (!isPast) balance -= planPerPeriod(p.getUTCFullYear());
 
       chartData.push({ dateObj: p, date: fmtISO(p), logged: isPast ? balance : null, projected: !isPast ? balance : null });
 
